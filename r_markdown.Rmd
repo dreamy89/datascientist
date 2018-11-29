@@ -1,0 +1,393 @@
+---
+title: "Iconic - Data Science Challenge"
+author: "Mickey Shi"
+date: "28 November 2018"
+output:
+  html_document:
+    df_print: paged
+---
+
+###Executive Report
+The Data Science team has managed to develop a Deep Learning model that can predict customers' gender (where unknown) with an accuracy of 97% based on their purchase information. 
+
+The model recognised certain variables to be the most important in predicting gender:
+1. Proportion of items relating to Women Apparel
+2. Proportion of items relating to Women Footwear
+3. Proportion of Unisex items
+
+The model is based on provided customer purchase data, although very extensive but required the following modifications to be fully useful (more derivation logics can be found in the "CLEAN" section of this report):
+- 249 records were found to be duplicate and were removed
+- The Days Since Last Order variable was corrected to contain day values
+- The Average Discount Rate variable was changed to percentage values
+- Corrected certain records with cancels and returns being greater than orders
+- Newsletter Subscriber indicator was changed to factor based variable
+- Coupon Discount variable had missing value and was imputed to 0
+
+The data provided describes the absolute amount of orders, items, discounts and revenue. Further feature engineering included:
+- Percentiles and starndardised values which reflected information relative in the overall distribution for all customers in the data
+- Proportion of categorised items respective to overall purchase which reflected relative values of the same customer
+
+Given there is no direct gender information provided, the classification of gender was inferred from the proportions of female and male items. The analysis of the distribution showed there to be a clear distinction in the proportions of gender specific item purchases, therefore a reasonable (and key) assumption would be to infer gender classes from the gender specific item variables.
+
+Despite the already high accuracy of the model, there are still potential new variables which can improve the prediction accuracy, they include and are not limited to:
+- Known Gender: This can greatly reduce noise caused by the assumption of the derived gender class variable
+- Customer Names & Titles: Using text machine learning models to classify gender
+- Web Interactions: number of clicks, views, cart items can further enrich the user behaviour information
+- Contact/Support (Live Chat and Phone): Using NPL and text ML models to classify gender
+- Subscription Preferences: Can greatly improve visibility of gender specific preferences
+
+The cost of getting these variables/models are to be weighted against the benefit of having additional accuracy in predicting gender to improve business sales.
+
+
+###Background
+Many of our customers at THE ICONIC - similar to most online shoppers - only provide the bare minimum of information needed when signing up as a new user or making a transaction on the site (i.e credit card details, delivery address etc). They do not provide their age, gender or any other personal details when they register as a new customer or they will simply purchase their items as a 'Guest' user.
+
+Respecting customer privacy is of the utmost important at THE ICONIC and we understand why some shoppers are hesitant to provide personal information. However, to be able to better tailor our site, branding strategy, marketing, product and most importantly merchandising, we need to have a better handle on the profile of our shopper and understand the things that are more relevant to them.
+
+What we have identified here is an opportunity to 'infer' a customer's gender based on the amazingly rich user behavioural data, which will allow us to better tailor our site and offerings to their needs.
+
+More information at https://github.com/theiconic/datascientist
+
+Download files at:
+https://github.com/theiconic/datascientist/raw/master/test_data.db.zip
+https://github.com/theiconic/datascientist/raw/master/test_data.zip
+
+
+Load Libraries & Set directory
+``` {r warning=FALSE,message=FALSE}
+library(openssl)
+library(sqldf)
+library(dplyr)
+library(jsonlite)
+library(h2o)
+setwd("C:/Users/Mickey Shi/Documents/Iconic Project/")
+``` 
+Follow instructions to unzip to directory
+``` {r warning=FALSE,message=FALSE}
+#Generate password
+raw_data_pw <- "welcometotheiconic"
+sha256(raw_data_pw)
+```
+
+###Setup and Preparation
+``` {r warning=FALSE,message=FALSE}
+
+#Read data base file into R
+sqlite.driver <- dbDriver("SQLite")
+db <- dbConnect(sqlite.driver, dbname = "test_data.db")
+dbListTables(db)
+customers_raw <- dbReadTable(db,"customers")
+```
+
+###Stage 1 : SQL
+Unhash the sqlite database (test_data.db.zip) using the secret key provided by us, extract it.
+Write SQL queries to answer the following questions:
+
+1.What was the total revenue to the nearest dollar for customers who have paid by credit card?
+Assumptions:
+- "revenue" is net of discounts and cancellations
+``` {r warning=FALSE,message=FALSE}
+q1_ans <- sqldf("
+                select round(sum(revenue),0) as cc_revenue
+                from customers_raw
+                where cc_payments > 0
+                ")
+q1_ans <- paste("$", prettyNum(q1_ans, big.mark = ","), sep="")
+```
+Answer: `r q1_ans`
+
+2.What percentage of customers who have purchased female items have paid by credit card?
+Assume non multually exclusive for customers who pays by different payment methods
+``` {r warning=FALSE,message=FALSE}
+q2_ans <- sqldf("
+                select round(
+                  cast(count(distinct (case when cc_payments > 0 then customer_id end)) as real)/
+                  cast(count(distinct customer_id) as real),2)*100 as perc
+                from customers_raw
+                where female_items > 0
+                ")
+q2_ans <- paste(q2_ans, "%", sep="")
+```
+Answer: `r q2_ans`
+
+3.What was the average revenue for customers who used either iOS, Android or Desktop?
+``` {r warning=FALSE,message=FALSE}
+q3_ans <- sqldf("
+                select round(avg(revenue),2)
+                from customers_raw
+                where ios_orders > 0 or android_orders > 0 or desktop_orders > 0
+                ")
+q3_ans <- paste("$", prettyNum(q3_ans, big.mark = ","), sep="")
+``` 
+Answer: `r q3_ans`
+
+4. We want to run an email campaign promoting a new mens luxury brand. Can you provide a list of customers we should send to?
+``` {r warning=FALSE,message=FALSE}
+q4_ans <- sqldf("
+                select customer_id
+                from customers_raw
+                where is_newsletter_subscriber = 'Y' and male_items > 0
+                ")
+write.csv(q4_ans, "email_campaign_list.csv")
+``` 
+Answer: See full list in file "email_campaign_list.csv"
+
+
+Partial clean up
+``` {r warning=FALSE,message=FALSE}
+rm(customers_raw)
+```
+
+
+###Stage 2 : CLEAN
+Unhash the data (test_data.zip) using the secret key provided by us, extract it, most importantly clean it and put it in a form you can use - all programatically of course. We have also "intentionally" corrupted two columns in this file - two columns that might look correct but are not correct. They need "some correction" to be useful.
+
+``` {r warning=FALSE,message=FALSE}
+
+raw_data <- read_json("data.json", simplifyVector = TRUE)
+
+#Check and remove duplicates
+check1 <- sum(duplicated(raw_data))
+raw_data <- raw_data[!duplicated(raw_data),]
+
+#Convert days_since_last_order variable from hours to days
+raw_data$days_since_last_order <- raw_data$days_since_last_order/24
+
+#Convert average_discount_used variable to percentage
+raw_data$average_discount_used <- raw_data$average_discount_used/10000
+
+#Fix formats
+raw_data$is_newsletter_subscriber <- as.factor(raw_data$is_newsletter_subscriber)
+
+#Impute coupon_discount_applied variable with 0
+raw_data$coupon_discount_applied[is.na(raw_data$coupon_discount_applied)] <- 0
+
+#Correct cancel/return orders to be less or equal to total orders
+raw_data$cancels <- ifelse(raw_data$orders<raw_data$cancels,raw_data$orders,raw_data$cancels)
+raw_data$returns <- ifelse(raw_data$orders<raw_data$returns,raw_data$orders,raw_data$returns)
+
+```
+
+Data Cleaning Summary:  <br />
+- Duplicates removed: `r check1`  <br />
+- Changed days_since_last_order from hours to days  <br />
+- Changed average_discount_used to discount rate (between 0 and 1)  <br />
+- Changed format is_newsletter_subscriber variable to factor  <br />
+- Imputed coupon_discount_applied with 0 value
+
+###Stage 3 : BUILD
+Build a deep learning model (preferably) or any other model that suitably answers this question and predict the inferred gender using the features provided and deriving more featueres at your end. Remember, there is no gender flag, so you are flying blind here.
+
+``` {r warning=FALSE,message=FALSE}
+#Derive additional variables
+
+#Purchased orders
+raw_data$purchases <- ifelse(raw_data$orders<raw_data$cancels,0,raw_data$orders - raw_data$cancels)
+
+#Total purchase amount
+raw_data$purchase_tot <- raw_data$revenue/(1-raw_data$average_discount_used)
+
+#Average price per purchase
+raw_data$avg_purchase_price <- raw_data$purchase_tot/raw_data$purchases
+
+#cancellation rate
+raw_data$cancel_rate <- ifelse(raw_data$cancels>raw_data$orders,0, raw_data$cancels/raw_data$orders)
+
+#return rate
+raw_data$return_rate <- ifelse(raw_data$returns>raw_data$orders,0, raw_data$returns/raw_data$orders)
+
+#Derive proportions of items
+raw_data$female_items_prop <- raw_data$female_items/raw_data$items
+raw_data$male_items_prop <- raw_data$male_items/raw_data$items
+raw_data$unisex_items_prop <- raw_data$unisex_items/raw_data$items
+raw_data$wapp_items_prop <- raw_data$wapp_items/raw_data$items
+raw_data$wftw_items_prop <- raw_data$wftw_items/raw_data$items
+raw_data$mapp_items_prop <- raw_data$mapp_items/raw_data$items
+raw_data$wacc_items_prop <- raw_data$wacc_items/raw_data$items
+raw_data$macc_items_prop <- raw_data$macc_items/raw_data$items
+raw_data$mftw_items_prop <- raw_data$mftw_items/raw_data$items
+raw_data$wspt_items_prop <- raw_data$wspt_items/raw_data$items
+raw_data$mspt_items_prop <- raw_data$mspt_items/raw_data$items
+raw_data$curvy_items_prop <- raw_data$curvy_items/raw_data$items
+raw_data$sacc_items_prop <- raw_data$sacc_items/raw_data$items
+raw_data$msite_orders_prop <- raw_data$msite_orders/raw_data$orders
+raw_data$desktop_orders_prop <- raw_data$desktop_orders/raw_data$orders
+raw_data$android_orders_prop <- raw_data$android_orders/raw_data$orders
+raw_data$ios_orders_prop <- raw_data$ios_orders/raw_data$orders
+raw_data$other_device_orders_prop <- raw_data$other_device_orders/raw_data$orders
+raw_data$work_orders_prop <- raw_data$work_orders/raw_data$orders
+raw_data$home_orders_prop <- raw_data$home_orders/raw_data$orders
+raw_data$parcelpoint_orders_prop <- raw_data$parcelpoint_orders/raw_data$orders
+raw_data$other_collection_orders_prop <- raw_data$other_collection_orders/raw_data$orders
+
+#calculate CDF values and standardised values
+perc_vars <- c(
+"days_since_first_order",
+"days_since_last_order",
+"orders",
+"items",
+"cancels",
+"returns",
+"different_addresses",
+"shipping_addresses",
+"devices",
+"vouchers",
+"cc_payments",
+"paypal_payments",
+"afterpay_payments",
+"apple_payments",
+"unisex_items",
+"wapp_items",
+"wftw_items",
+"mapp_items",
+"wacc_items",
+"macc_items",
+"mftw_items",
+"wspt_items",
+"mspt_items",
+"curvy_items",
+"sacc_items",
+"msite_orders",
+"desktop_orders",
+"android_orders",
+"ios_orders",
+"other_device_orders",
+"work_orders",
+"home_orders",
+"parcelpoint_orders",
+"other_collection_orders",
+"revenue"
+  )
+
+for (i in 1:length(perc_vars)) {
+  cdf <- ecdf(raw_data[, which(names(raw_data) %in% perc_vars[i])])
+  temp_vc <-cdf(raw_data[, which(names(raw_data) %in% perc_vars[i])]) 
+  raw_data <- cbind(raw_data, temp_vc)
+  colnames(raw_data)[which(colnames(raw_data)=="temp_vc")] <- paste0(perc_vars[i], "_perc")
+  
+  temp_vc <- scale(raw_data[, which(names(raw_data) %in% perc_vars[i])])
+  raw_data <- cbind(raw_data, temp_vc)
+  colnames(raw_data)[which(colnames(raw_data)=="temp_vc")] <- paste0(perc_vars[i], "_std")
+}
+
+#Analyse proportions of female and male related items
+hist(raw_data$female_items_prop)
+
+#Model Assumption - The distribution of female items are quite definite in highlighting majority female or male item purchases. Therefore a fair assumption would be that "female_items" and "male_items" can provide a reasonable indication of the gender of the customers. More specifically, if more than 50% of the items are relation to female when the gender of the customer is assumped to be female.
+
+#create model dataset
+drop_vars <- c(
+  "female_items",
+  "male_items",
+  "female_items_prop",
+  "male_items_prop"
+  )
+
+gender_cutoff <- 0.5
+
+#Derive Gender Class
+gender_class <- ifelse(raw_data$female_items_prop>gender_cutoff, "female", "male")
+model_data<- cbind(raw_data, gender_class)
+
+model_data <- model_data[, -which(names(model_data) %in% drop_vars)]
+```
+
+
+####Construct Deep Neural Net model
+``` {r warning=FALSE,message=FALSE, results = 'hide'}
+h2o.init(nthreads=-1, max_mem_size="4G")
+h2o.removeAll()
+
+train_prop<-0.6
+val_prop<-0.2
+
+h2o_model_data <- as.h2o(model_data)
+
+#Split train, validation and test data
+splits <- h2o.splitFrame(h2o_model_data, c(train_prop,val_prop), seed=12345)
+train_data  <- h2o.assign(splits[[1]], "train.hex")
+val_data  <- h2o.assign(splits[[2]], "valid.hex")
+test_data   <- h2o.assign(splits[[3]], "test.hex")
+
+#Set response and predictors
+response <- "gender_class"
+predictors <- setdiff(names(train_data), response)
+
+
+#Model 0 - Basic Neural Net
+model0 <- h2o.deeplearning(
+  model_id="model0", 
+  training_frame=train_data, 
+  validation_frame=val_data,
+  x=predictors,
+  y=response,
+  hidden=c(200),
+  epochs=1,
+  variable_importances=T
+)
+
+#Model 1 - Deep Neural Net with hyper parameter tuning (random search)
+
+hypertune_par <- list(
+#Activation functions
+  activation=c("Rectifier","Tanh","Maxout","RectifierWithDropout","TanhWithDropout","MaxoutWithDropout"),
+
+#Hidden Layers
+  hidden=list(c(100,100),c(200,200),c(100,100,100),c(100,100,100,100)),
+
+#Dropout Ratio
+  input_dropout_ratio=c(0,0.1),
+
+#Regularizations
+  l1=c(0,0.0005,0.001),
+  l2=c(0,0.0005,0.001)
+)
+
+search_function <- list(strategy = "RandomDiscrete", max_models = 100, seed=12345, stopping_rounds=3, stopping_tolerance = 0.01)
+
+dl_grid <- h2o.grid(
+  training_frame=train_data,
+  validation_frame=val_data,
+  algorithm="deeplearning",
+  x=predictors,
+  y=response,
+  epochs=1,
+  stopping_metric="AUC",
+  grid_id="dl_grid",
+  score_duty_cycle=0.1,
+  hyper_params=hypertune_par,
+  search_criteria=search_function
+)
+
+model1_grid <- h2o.getGrid("dl_grid",sort_by="AUC",decreasing=TRUE)
+
+model1<-h2o.getModel(model1_grid@model_ids[[1]])
+
+#Inspect variable importance
+model1_varimp <- head(as.data.frame(h2o.varimp(model1)),10)
+``` 
+
+Model Comparison
+``` {r warning=FALSE,message=FALSE}
+h2o.performance(model0, test_data)
+h2o.performance(model1, test_data)
+``` 
+
+Top 10 important variables
+`r model1_varimp`
+
+####Save best performing model
+``` {r warning=FALSE,message=FALSE}
+h2o.saveModel(model1, path = "C:/Users/Mickey Shi/Documents/Iconic Project", force=TRUE)
+``` 
+
+###Stage 4 : DELIVER
+Package all your process, findings and code into a reproducible document that can be understood by a business user. A repo of the code branch would be a great thing to have! This reproducible report* must answer the following questions:
+
+1. How did you clean the data and what was wrong with it? Close to 90% of a Data Scientist's job is in cleaning data
+2. What are the features you used as-is and which one did you engineer using the given ones? What do they mean in the real world?
+3. What does the output look like - how close is the accuracy of the prediction in light of data with labelled flags?
+4. What other features and variables can you think of, that can make this process more robust? Can you make a recommendation of top 5 features you'd seek to find apart from the ones given here
+5. Summarize your findings in an executive summary
+
+All items answered in the body of the report
